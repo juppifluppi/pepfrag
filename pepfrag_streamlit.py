@@ -8,6 +8,12 @@ from rdkit.Chem import Draw
 from rdkit.Chem.Descriptors import ExactMolWt
 from streamlit_ketcher import st_ketcher
 
+st.set_page_config(
+    page_title="pepfrag",
+    layout="wide"
+)
+
+
 # =============================
 # Constants
 # =============================
