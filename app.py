@@ -36,6 +36,7 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS custom_aa (
             code TEXT PRIMARY KEY,
+            smiles TEXT,
             mass REAL
         )
     """)
@@ -48,13 +49,18 @@ def load_custom():
     conn.close()
     return df
 
-def save_custom(code, mass):
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("REPLACE INTO custom_aa VALUES (?, ?)",
-              (code.upper(), mass))
-    conn.commit()
-    conn.close()
+def save_custom(code, smiles):
+    mol = Chem.MolFromSmiles(smiles)
+    if mol:
+        mass = ExactMolWt(mol)
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        c.execute("REPLACE INTO custom_aa VALUES (?, ?, ?)",
+                  (code.upper(), smiles, mass))
+        conn.commit()
+        conn.close()
+        return True
+    return False
 
 def delete_custom(code):
     conn = sqlite3.connect(DB)
@@ -64,7 +70,7 @@ def delete_custom(code):
     conn.close()
 
 # =============================
-# Parse Sequence (A or (XXX))
+# Parse Sequence
 # =============================
 def parse_sequence(seq):
     tokens = re.findall(r'\([A-Za-z0-9]+\)|[A-Z]', seq)
@@ -74,7 +80,7 @@ def parse_sequence(seq):
     for t in tokens:
         if t.startswith("("):
             cleaned.append(t[1:-1])
-            fasta_seq += "X"  # placeholder for structure
+            fasta_seq += "X"  # placeholder in structure
         else:
             cleaned.append(t)
             fasta_seq += t
@@ -113,29 +119,35 @@ def compute_mz(mass, z):
 # =============================
 # UI
 # =============================
-st.title("🔬 Peptide MS/MS Tool (Stable & Chemically Safe)")
+st.title("🔬 Peptide MS/MS Research Tool")
 
 init_db()
 custom_df = load_custom()
 
-# Sidebar
+# Sidebar Drawer Restored
 with st.sidebar.expander("Custom Amino Acid Manager", expanded=False):
-    code = st.text_input("3-letter Code")
-    mass = st.number_input("Residue Mass (monoisotopic)", format="%.6f")
+
+    st.markdown("Draw full residue (free amino acid form).")
+
+    code = st.text_input("3-letter Code (e.g., ORN)")
+    smiles = st_ketcher(height=250)
 
     if st.button("Save Custom AA"):
-        save_custom(code, mass)
-        st.success("Saved.")
+        if save_custom(code, smiles):
+            st.success("Saved successfully.")
+        else:
+            st.error("Invalid structure.")
 
     st.subheader("Database")
+
     for _, row in custom_df.iterrows():
         col1, col2 = st.columns([4,1])
-        col1.write(f"{row['code']} ({row['mass']})")
+        col1.markdown(f"**{row['code']}**  \nMass: {round(row['mass'],4)}  \n`{row['smiles']}`")
         if col2.button("Delete", key=row["code"]):
             delete_custom(row["code"])
             st.rerun()
 
-# Main
+# Main Interface
 sequence = st.text_input("Peptide Sequence (e.g., ACD(ORN)K)")
 include_losses = st.checkbox("Include neutral losses (-H2O / -NH3)", value=True)
 
@@ -149,7 +161,7 @@ if sequence:
         else:
             row = custom_df[custom_df["code"] == t]
             if row.empty:
-                st.error("Unknown residue.")
+                st.error(f"Unknown residue: {t}")
                 st.stop()
             masses.append(row.iloc[0]["mass"])
 
@@ -185,6 +197,6 @@ if sequence:
     ))
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Full Peptide Structure")
+    st.subheader("Peptide Structure (Standard Residues Only)")
     mol = Chem.MolFromFASTA(fasta_seq)
     st.image(Draw.MolToImage(mol, size=(700,300)))
