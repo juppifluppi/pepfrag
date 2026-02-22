@@ -33,6 +33,16 @@ AA_MASS = {
 def init_db():
     conn = sqlite3.connect(DB)
     c = conn.cursor()
+
+    # Check existing table structure
+    c.execute("PRAGMA table_info(custom_aa)")
+    columns = [col[1] for col in c.fetchall()]
+
+    # If schema is outdated, drop table
+    if columns and ("smiles" not in columns or "mass" not in columns):
+        c.execute("DROP TABLE IF EXISTS custom_aa")
+
+    # Create correct table
     c.execute("""
         CREATE TABLE IF NOT EXISTS custom_aa (
             code TEXT PRIMARY KEY,
@@ -40,6 +50,7 @@ def init_db():
             mass REAL
         )
     """)
+
     conn.commit()
     conn.close()
 
