@@ -10,6 +10,7 @@ from streamlit_ketcher import st_ketcher
 
 st.set_page_config(
     page_title="pepfrag",
+    page_icon="🧮",                
     layout="wide"
 )
 
