@@ -72,10 +72,8 @@ def save_custom(code, structure, description):
     if isinstance(structure, dict):
         smiles = structure.get("smiles", "")
         molfile = structure.get("molfile", "")
-
         if smiles:
             mol = Chem.MolFromSmiles(smiles)
-
         if mol is None and molfile:
             mol = Chem.MolFromMolBlock(molfile)
 
@@ -116,28 +114,54 @@ def delete_custom(code):
 # =============================
 def parse_sequence(seq):
     tokens = re.findall(r'\([A-Za-z0-9]+\)|[A-Z]', seq)
-    cleaned = []
-    fasta_seq = ""
-    custom_positions = []
+    return [t[1:-1] if t.startswith("(") else t for t in tokens]
 
-    for i, t in enumerate(tokens):
-        if t.startswith("("):
-            cleaned.append(t[1:-1])
-            fasta_seq += "F"  # phenylalanine marker
-            custom_positions.append(i)
+# =============================
+# Visual Peptide Builder
+# =============================
+def build_visual_peptide(tokens, custom_df):
+
+    backbone = Chem.RWMol()
+    prev_c = None
+
+    for t in tokens:
+
+        n = backbone.AddAtom(Chem.Atom("N"))
+        ca = backbone.AddAtom(Chem.Atom("C"))
+        c = backbone.AddAtom(Chem.Atom("C"))
+        o = backbone.AddAtom(Chem.Atom("O"))
+
+        backbone.AddBond(n, ca, Chem.rdchem.BondType.SINGLE)
+        backbone.AddBond(ca, c, Chem.rdchem.BondType.SINGLE)
+        backbone.AddBond(c, o, Chem.rdchem.BondType.DOUBLE)
+
+        if prev_c is not None:
+            backbone.AddBond(prev_c, n, Chem.rdchem.BondType.SINGLE)
+
+        prev_c = c
+
+        if t in AA_MASS:
+            # Standard → simple methyl
+            sc = backbone.AddAtom(Chem.Atom("C"))
+            backbone.AddBond(ca, sc, Chem.rdchem.BondType.SINGLE)
         else:
-            cleaned.append(t)
-            fasta_seq += t
+            # Custom → bulky artificial marker
+            marker = Chem.MolFromSmiles("C(C1=CC=CC=C1)(C1=CC=CC=C1)")
+            offset = backbone.GetNumAtoms()
+            backbone.InsertMol(marker)
+            backbone.AddBond(ca, offset, Chem.rdchem.BondType.SINGLE)
 
-    return cleaned, fasta_seq, custom_positions
+    mol = backbone.GetMol()
+    Chem.SanitizeMol(mol)
+    return mol
 
 # =============================
 # Fragmentation
 # =============================
 def generate_fragments(masses, include_losses):
     fragments = []
-
     running = 0
+
     for i in range(len(masses)-1):
         running += masses[i]
         b = running + PROTON
@@ -161,7 +185,7 @@ def compute_mz(mass, z):
     return (mass + z*PROTON)/z
 
 # =============================
-# App
+# App Start
 # =============================
 st.title("🔬 Peptide MS/MS Research Tool")
 
@@ -216,7 +240,7 @@ st.subheader("PTM Quick Toggles")
 selected_ptms = [ptm for ptm in PTM_LIBRARY if st.checkbox(ptm)]
 
 if sequence:
-    tokens, fasta_seq, custom_positions = parse_sequence(sequence.upper())
+    tokens = parse_sequence(sequence.upper())
 
     masses = []
     for t in tokens:
@@ -263,6 +287,5 @@ if sequence:
     st.plotly_chart(fig, width="stretch")
 
     st.subheader("Peptide Structure Preview")
-    mol = Chem.MolFromFASTA(fasta_seq)
-    if mol:
-        st.image(Draw.MolToImage(mol, size=(700,300)))
+    visual_mol = build_visual_peptide(tokens, custom_df)
+    st.image(Draw.MolToImage(visual_mol, size=(700,300)))
