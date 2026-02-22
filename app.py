@@ -28,7 +28,7 @@ AA_MASS = {
 }
 
 # =============================
-# PTM Library (Monoisotopic ΔMass)
+# PTM Library
 # =============================
 PTM_LIBRARY = {
     "Phospho (S,T,Y)": 79.966331,
@@ -65,38 +65,28 @@ def load_custom():
     df = pd.read_sql_query("SELECT * FROM custom_aa", conn)
     conn.close()
     return df
-    
+
 def save_custom(code, structure):
     if not code or not structure:
         return False
 
     mol = None
 
-    # Case 1 — structure is dict (new Ketcher)
     if isinstance(structure, dict):
-
-        # Try SMILES first
         smiles = structure.get("smiles", "")
+        molfile = structure.get("molfile", "")
+
         if smiles:
             mol = Chem.MolFromSmiles(smiles)
 
-        # If SMILES failed, try molfile
-        if mol is None:
-            molfile = structure.get("molfile", "")
-            if molfile:
-                mol = Chem.MolFromMolBlock(molfile)
+        if mol is None and molfile:
+            mol = Chem.MolFromMolBlock(molfile)
 
-    # Case 2 — structure is string (older Ketcher)
     elif isinstance(structure, str):
-
-        # Try MolBlock
         mol = Chem.MolFromMolBlock(structure)
-
-        # If that fails, try SMILES
         if mol is None:
             mol = Chem.MolFromSmiles(structure)
 
-    # If still no molecule → invalid
     if mol is None:
         return False
 
@@ -113,9 +103,7 @@ def save_custom(code, structure):
         )
         conn.commit()
         conn.close()
-
         return True
-
     except:
         return False
 
@@ -174,7 +162,7 @@ def compute_mz(mass, z):
     return (mass + z*PROTON)/z
 
 # =============================
-# UI
+# App Start
 # =============================
 st.title("🔬 Peptide MS/MS Research Tool")
 
@@ -182,70 +170,41 @@ init_db()
 custom_df = load_custom()
 
 # =============================
-# Sidebar – Custom AA Manager
+# Custom AA Section (Main Page)
 # =============================
-with st.sidebar.expander("Custom Amino Acid Manager", expanded=False):
+st.header("➕ Add Custom Amino Acid")
 
-    st.markdown("Draw full free amino acid structure.")
+with st.expander("Draw and Save Custom Amino Acid", expanded=False):
+
+    st.markdown("Draw full free amino acid structure (H2N–CHR–COOH).")
 
     code = st.text_input("3-letter Code")
-
-    structure = st_ketcher(height=250)
+    structure = st_ketcher(height=500)
 
     if st.button("Save Custom AA"):
 
-        if not code:
-            st.error("Please provide a 3-letter code.")
-            st.stop()
-
-        if structure is None or structure == "" or structure == {}:
-            st.error("No structure detected. After drawing, click 'Apply' inside the drawer.")
-            st.stop()
-
-        mol = None
-
-        # If dict (newer Ketcher)
-        if isinstance(structure, dict):
-            smiles = structure.get("smiles", "")
-            molfile = structure.get("molfile", "")
-
-            if smiles:
-                mol = Chem.MolFromSmiles(smiles)
-
-            if mol is None and molfile:
-                mol = Chem.MolFromMolBlock(molfile)
-
-        # If string (older Ketcher)
-        elif isinstance(structure, str):
-            mol = Chem.MolFromMolBlock(structure)
-            if mol is None:
-                mol = Chem.MolFromSmiles(structure)
-
-        if mol is None:
-            st.error("Structure parsing failed.")
-            st.stop()
-
-        try:
-            Chem.SanitizeMol(mol)
-            mass = ExactMolWt(mol)
-            smiles = Chem.MolToSmiles(mol)
-
-            conn = sqlite3.connect(DB)
-            c = conn.cursor()
-            c.execute(
-                "REPLACE INTO custom_aa VALUES (?, ?, ?)",
-                (code.upper(), smiles, mass)
-            )
-            conn.commit()
-            conn.close()
-
-            st.success(f"Saved successfully. Mass = {round(mass,4)}")
-
-        except Exception as e:
-            st.error(f"RDKit sanitization failed: {e}")
+        if save_custom(code, structure):
+            st.success("Custom amino acid saved.")
+        else:
+            st.error("Invalid structure or no structure detected.")
 
 # =============================
-# Main Interface
+# Sidebar Database
+# =============================
+with st.sidebar:
+    st.subheader("Custom AA Database")
+
+    for _, row in custom_df.iterrows():
+        col1, col2 = st.columns([4,1])
+        col1.markdown(
+            f"**{row['code']}**  \nMass: {round(row['mass'],4)}"
+        )
+        if col2.button("Delete", key=row["code"]):
+            delete_custom(row["code"])
+            st.rerun()
+
+# =============================
+# Main Peptide Section
 # =============================
 sequence = st.text_input("Peptide Sequence (e.g., ACD(ORN)K)")
 include_losses = st.checkbox("Include neutral losses (-H2O / -NH3)", value=True)
@@ -273,7 +232,6 @@ if sequence:
 
         masses.append(mass)
 
-    # Apply PTMs
     total_ptm_shift = sum(PTM_LIBRARY[p] for p in selected_ptms)
     neutral_mass = sum(masses) + H2O + total_ptm_shift
 
@@ -299,7 +257,7 @@ if sequence:
     ])
     st.dataframe(frag_df)
 
-    st.subheader("Simulated Spectrum")
+    st.subheader("Simulated MS/MS Spectrum")
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=[compute_mz(m + total_ptm_shift,1) for _,m in fragments],
@@ -309,9 +267,8 @@ if sequence:
     st.plotly_chart(fig, width="stretch")
 
     st.subheader("Peptide Structure Preview")
-
     mol = Chem.MolFromFASTA(fasta_seq)
-    if mol is not None:
+    if mol:
         st.image(Draw.MolToImage(mol, size=(700,300)))
     else:
-        st.warning("Structure preview unavailable for this sequence.")
+        st.warning("Structure preview unavailable.")
