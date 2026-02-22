@@ -27,9 +27,6 @@ AA_MASS = {
     "T": 101.04768, "W": 186.07931, "Y": 163.06333, "V": 99.06841,
 }
 
-# =============================
-# PTM Library
-# =============================
 PTM_LIBRARY = {
     "Phospho (S,T,Y)": 79.966331,
     "Oxidation (M)": 15.994915,
@@ -46,15 +43,15 @@ def init_db():
 
     c.execute("PRAGMA table_info(custom_aa)")
     columns = [col[1] for col in c.fetchall()]
-
-    if columns and ("smiles" not in columns or "mass" not in columns):
+    if columns and ("description" not in columns):
         c.execute("DROP TABLE IF EXISTS custom_aa")
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS custom_aa (
             code TEXT PRIMARY KEY,
             smiles TEXT,
-            mass REAL
+            mass REAL,
+            description TEXT
         )
     """)
     conn.commit()
@@ -66,7 +63,7 @@ def load_custom():
     conn.close()
     return df
 
-def save_custom(code, structure):
+def save_custom(code, structure, description):
     if not code or not structure:
         return False
 
@@ -98,8 +95,8 @@ def save_custom(code, structure):
         conn = sqlite3.connect(DB)
         c = conn.cursor()
         c.execute(
-            "REPLACE INTO custom_aa VALUES (?, ?, ?)",
-            (code.upper(), smiles, mass)
+            "REPLACE INTO custom_aa VALUES (?, ?, ?, ?)",
+            (code.upper(), smiles, mass, description)
         )
         conn.commit()
         conn.close()
@@ -121,16 +118,18 @@ def parse_sequence(seq):
     tokens = re.findall(r'\([A-Za-z0-9]+\)|[A-Z]', seq)
     cleaned = []
     fasta_seq = ""
+    custom_positions = []
 
-    for t in tokens:
+    for i, t in enumerate(tokens):
         if t.startswith("("):
             cleaned.append(t[1:-1])
-            fasta_seq += "A"  # placeholder for structure
+            fasta_seq += "F"  # phenylalanine marker
+            custom_positions.append(i)
         else:
             cleaned.append(t)
             fasta_seq += t
 
-    return cleaned, fasta_seq
+    return cleaned, fasta_seq, custom_positions
 
 # =============================
 # Fragmentation
@@ -162,75 +161,73 @@ def compute_mz(mass, z):
     return (mass + z*PROTON)/z
 
 # =============================
-# App Start
+# App
 # =============================
 st.title("🔬 Peptide MS/MS Research Tool")
 
 init_db()
 custom_df = load_custom()
 
-# =============================
-# Custom AA Section (Main Page)
-# =============================
+# -----------------------------
+# Add Custom AA
+# -----------------------------
 st.header("➕ Add Custom Amino Acid")
 
 with st.expander("Draw and Save Custom Amino Acid", expanded=False):
 
-    st.markdown("Draw full free amino acid structure (H2N–CHR–COOH).")
-
     code = st.text_input("3-letter Code")
+    description = st.text_input("Description (optional)")
     structure = st_ketcher(height=500)
 
     if st.button("Save Custom AA"):
-
-        if save_custom(code, structure):
+        if save_custom(code, structure, description):
             st.success("Custom amino acid saved.")
+            st.rerun()
         else:
             st.error("Invalid structure or no structure detected.")
 
-# =============================
+# -----------------------------
 # Sidebar Database
-# =============================
+# -----------------------------
 with st.sidebar:
     st.subheader("Custom AA Database")
 
     for _, row in custom_df.iterrows():
-        col1, col2 = st.columns([4,1])
-        col1.markdown(
-            f"**{row['code']}**  \nMass: {round(row['mass'],4)}"
-        )
-        if col2.button("Delete", key=row["code"]):
+        st.markdown(f"### {row['code']}")
+        st.write(f"Mass: {round(row['mass'],4)}")
+        if row["description"]:
+            st.write(row["description"])
+
+        mol = Chem.MolFromSmiles(row["smiles"])
+        if mol:
+            st.image(Draw.MolToImage(mol, size=(250,150)))
+
+        if st.button("Delete", key=row["code"]):
             delete_custom(row["code"])
             st.rerun()
 
-# =============================
-# Main Peptide Section
-# =============================
+# -----------------------------
+# Peptide Analysis
+# -----------------------------
 sequence = st.text_input("Peptide Sequence (e.g., ACD(ORN)K)")
 include_losses = st.checkbox("Include neutral losses (-H2O / -NH3)", value=True)
 
 st.subheader("PTM Quick Toggles")
-selected_ptms = []
-for ptm in PTM_LIBRARY:
-    if st.checkbox(ptm):
-        selected_ptms.append(ptm)
+selected_ptms = [ptm for ptm in PTM_LIBRARY if st.checkbox(ptm)]
 
 if sequence:
-    tokens, fasta_seq = parse_sequence(sequence.upper())
+    tokens, fasta_seq, custom_positions = parse_sequence(sequence.upper())
 
     masses = []
-
     for t in tokens:
         if t in AA_MASS:
-            mass = AA_MASS[t]
+            masses.append(AA_MASS[t])
         else:
             row = custom_df[custom_df["code"] == t]
             if row.empty:
                 st.error(f"Unknown residue: {t}")
                 st.stop()
-            mass = row.iloc[0]["mass"]
-
-        masses.append(mass)
+            masses.append(row.iloc[0]["mass"])
 
     total_ptm_shift = sum(PTM_LIBRARY[p] for p in selected_ptms)
     neutral_mass = sum(masses) + H2O + total_ptm_shift
@@ -244,7 +241,7 @@ if sequence:
     fragments = generate_fragments(masses, include_losses)
 
     st.subheader("Fragment Table")
-    frag_df = pd.DataFrame([
+    st.dataframe(pd.DataFrame([
         {
             "Fragment": name,
             "z=1": round(compute_mz(m + total_ptm_shift,1),4),
@@ -254,8 +251,7 @@ if sequence:
             "z=5": round(compute_mz(m + total_ptm_shift,5),4),
         }
         for name,m in fragments
-    ])
-    st.dataframe(frag_df)
+    ]))
 
     st.subheader("Simulated MS/MS Spectrum")
     fig = go.Figure()
@@ -270,5 +266,3 @@ if sequence:
     mol = Chem.MolFromFASTA(fasta_seq)
     if mol:
         st.image(Draw.MolToImage(mol, size=(700,300)))
-    else:
-        st.warning("Structure preview unavailable.")
