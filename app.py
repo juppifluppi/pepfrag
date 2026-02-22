@@ -200,9 +200,8 @@ custom_df = load_custom()
 # -----------------------------
 # Add Custom AA
 # -----------------------------
-st.write("Add custom amino acid:")
 
-with st.expander("Draw and Save Custom Amino Acid", expanded=False):
+with st.expander("Draw and save custom amino acid", expanded=False):
 
     code = st.text_input("3-letter Code")
     description = st.text_input("Description (optional)")
