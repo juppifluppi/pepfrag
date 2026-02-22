@@ -192,7 +192,7 @@ def compute_mz(mass, z):
 # =============================
 # App Start
 # =============================
-st.title("🔬 Peptide MS/MS Research Tool")
+st.title("PepFrag peptide MS tool")
 
 init_db()
 custom_df = load_custom()
@@ -200,7 +200,7 @@ custom_df = load_custom()
 # -----------------------------
 # Add Custom AA
 # -----------------------------
-st.header("➕ Add Custom Amino Acid")
+st.write("Add custom amino acid:")
 
 with st.expander("Draw and Save Custom Amino Acid", expanded=False):
 
