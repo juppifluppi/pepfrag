@@ -119,6 +119,9 @@ def parse_sequence(seq):
 # =============================
 # Visual Peptide Builder
 # =============================
+# =============================
+# Visual Peptide Builder
+# =============================
 def build_visual_peptide(tokens, custom_df):
 
     backbone = Chem.RWMol()
@@ -126,6 +129,7 @@ def build_visual_peptide(tokens, custom_df):
 
     for t in tokens:
 
+        # Backbone atoms
         n = backbone.AddAtom(Chem.Atom("N"))
         ca = backbone.AddAtom(Chem.Atom("C"))
         c = backbone.AddAtom(Chem.Atom("C"))
@@ -141,12 +145,13 @@ def build_visual_peptide(tokens, custom_df):
         prev_c = c
 
         if t in AA_MASS:
-            # Standard → simple methyl
+            # Standard residue → simple methyl sidechain
             sc = backbone.AddAtom(Chem.Atom("C"))
             backbone.AddBond(ca, sc, Chem.rdchem.BondType.SINGLE)
+
         else:
-            # Custom → bulky artificial marker
-            marker = Chem.MolFromSmiles("C(C1=CC=CC=C1)(C1=CC=CC=C1)")
+            # Custom residue → cyclobutane marker
+            marker = Chem.MolFromSmiles("C1CCC1")
             offset = backbone.GetNumAtoms()
             backbone.InsertMol(marker)
             backbone.AddBond(ca, offset, Chem.rdchem.BondType.SINGLE)
