@@ -8,12 +8,14 @@ from rdkit.Chem import Draw
 from rdkit.Chem.Descriptors import ExactMolWt
 from streamlit_ketcher import st_ketcher
 
+# =============================
+# Page Config
+# =============================
 st.set_page_config(
     page_title="pepfrag",
-    page_icon="🧮",                
+    page_icon="🧮",
     layout="wide"
 )
-
 
 # =============================
 # Constants
@@ -47,12 +49,6 @@ PTM_LIBRARY = {
 def init_db():
     conn = sqlite3.connect(DB)
     c = conn.cursor()
-
-    c.execute("PRAGMA table_info(custom_aa)")
-    columns = [col[1] for col in c.fetchall()]
-    if columns and ("description" not in columns):
-        c.execute("DROP TABLE IF EXISTS custom_aa")
-
     c.execute("""
         CREATE TABLE IF NOT EXISTS custom_aa (
             code TEXT PRIMARY KEY,
@@ -75,7 +71,6 @@ def save_custom(code, structure, description):
         return False
 
     mol = None
-
     if isinstance(structure, dict):
         smiles = structure.get("smiles", "")
         molfile = structure.get("molfile", "")
@@ -83,7 +78,6 @@ def save_custom(code, structure, description):
             mol = Chem.MolFromSmiles(smiles)
         if mol is None and molfile:
             mol = Chem.MolFromMolBlock(molfile)
-
     elif isinstance(structure, str):
         mol = Chem.MolFromMolBlock(structure)
         if mol is None:
@@ -117,60 +111,66 @@ def delete_custom(code):
     conn.close()
 
 # =============================
-# Sequence Parser
+# Sequence Parsing
 # =============================
 def parse_sequence(seq):
     tokens = re.findall(r'\([A-Za-z0-9]+\)|[A-Z]', seq)
-    return [t[1:-1] if t.startswith("(") else t for t in tokens]
 
-# =============================
-# Visual Peptide Builder
-# =============================
-# =============================
-# Visual Peptide Builder
-# =============================
-def build_visual_peptide(tokens, custom_df):
-
-    backbone = Chem.RWMol()
-    prev_c = None
+    clean_tokens = []
+    custom_positions = []
+    raw_tokens = []
 
     for i, t in enumerate(tokens):
-
-        # Backbone atoms
-        n = backbone.AddAtom(Chem.Atom("N"))
-        ca = backbone.AddAtom(Chem.Atom("C"))
-        c = backbone.AddAtom(Chem.Atom("C"))
-        o = backbone.AddAtom(Chem.Atom("O"))
-
-        backbone.AddBond(n, ca, Chem.rdchem.BondType.SINGLE)
-        backbone.AddBond(ca, c, Chem.rdchem.BondType.SINGLE)
-        backbone.AddBond(c, o, Chem.rdchem.BondType.DOUBLE)
-
-        # Connect previous residue (amide bond)
-        if prev_c is not None:
-            backbone.AddBond(prev_c, n, Chem.rdchem.BondType.SINGLE)
-
-        prev_c = c
-
-        # Attach sidechain
-        if t in AA_MASS:
-            sc = backbone.AddAtom(Chem.Atom("C"))
-            backbone.AddBond(ca, sc, Chem.rdchem.BondType.SINGLE)
+        raw_tokens.append(t)
+        if t.startswith("("):
+            clean_tokens.append("G")  # glycine placeholder
+            custom_positions.append(i)
         else:
-            # Custom residue → cyclobutane marker
-            marker = Chem.MolFromSmiles("C1CCC1")
-            offset = backbone.GetNumAtoms()
-            backbone.InsertMol(marker)
-            backbone.AddBond(ca, offset, Chem.rdchem.BondType.SINGLE)
+            clean_tokens.append(t)
 
-        # If this is the LAST residue → add terminal OH
-        if i == len(tokens) - 1:
-            o_term = backbone.AddAtom(Chem.Atom("O"))
-            backbone.AddBond(c, o_term, Chem.rdchem.BondType.SINGLE)
+    return clean_tokens, custom_positions, raw_tokens
 
-    mol = backbone.GetMol()
-    Chem.SanitizeMol(mol)
-    return mol
+# =============================
+# Structure Builder (Stable)
+# =============================
+def build_structure(tokens, custom_positions):
+
+    fasta_seq = "".join(tokens)
+    mol = Chem.MolFromFASTA(fasta_seq)
+
+    if mol is None:
+        return None, []
+
+    alpha_carbons = []
+
+    for atom in mol.GetAtoms():
+
+        if atom.GetSymbol() != "C":
+            continue
+
+        # skip carbonyl carbons (they have C=O double bond)
+        has_double_o = False
+        for bond in atom.GetBonds():
+            if bond.GetBondType() == Chem.rdchem.BondType.DOUBLE:
+                other = bond.GetOtherAtom(atom)
+                if other.GetSymbol() == "O":
+                    has_double_o = True
+        if has_double_o:
+            continue
+
+        neighbors = atom.GetNeighbors()
+        symbols = [n.GetSymbol() for n in neighbors]
+
+        # α-carbon must have one N neighbor and at least one C neighbor
+        if symbols.count("N") == 1 and symbols.count("C") >= 1:
+            alpha_carbons.append(atom.GetIdx())
+
+    highlight_atoms = []
+    for pos in custom_positions:
+        if pos < len(alpha_carbons):
+            highlight_atoms.append(alpha_carbons[pos])
+
+    return mol, highlight_atoms
 
 # =============================
 # Fragmentation
@@ -205,7 +205,6 @@ def compute_mz(mass, z):
 # App Start
 # =============================
 st.title("PepFrag peptide MS tool")
-
 st.write("PepFrag calculates m/z precursors and b/y ions to provide expected MS spectra.")
 
 init_db()
@@ -214,11 +213,7 @@ custom_df = load_custom()
 # -----------------------------
 # Add Custom AA
 # -----------------------------
-
 with st.expander("Draw and save custom amino acid", expanded=False):
-    
-    st.write("After drawing and providing a 3-letter code, click on 'Apply' and then on 'Save AA' to permanently add a custom AA to the database. Adding a description helps when searching the database.")
-    
     code = st.text_input("3-letter code")
     description = st.text_input("Description (optional)")
     structure = st_ketcher(height=500)
@@ -228,15 +223,13 @@ with st.expander("Draw and save custom amino acid", expanded=False):
             st.success("Custom amino acid saved.")
             st.rerun()
         else:
-            st.error("Invalid structure or no structure detected.")
+            st.error("Invalid structure.")
 
 # -----------------------------
 # Sidebar Database
 # -----------------------------
 with st.sidebar:
     st.subheader("Custom AA database")
-
-    # --- Search ---
     search_term = st.text_input("Search custom AA")
 
     if search_term:
@@ -247,13 +240,9 @@ with st.sidebar:
     else:
         filtered_df = custom_df
 
-    st.write(f"Showing {len(filtered_df)} entries")
-
-    # --- Display entries ---
     for _, row in filtered_df.iterrows():
         st.markdown(f"### {row['code']}")
         st.write(f"Mass: {round(row['mass'],4)}")
-
         if row["description"]:
             st.write(row["description"])
 
@@ -268,25 +257,26 @@ with st.sidebar:
 # -----------------------------
 # Peptide Analysis
 # -----------------------------
-sequence = st.text_input("Peptide sequence (use 1-letter codes for standard and 3-letter codes for custom AAs from the database, e.g. ACD(ORN)K)")
+sequence = st.text_input("Peptide sequence (e.g. ACD(ORN)K)")
 include_losses = st.checkbox("Include neutral losses (-H2O / -NH3)", value=True)
 
 st.write("PTM toggles:")
 selected_ptms = [ptm for ptm in PTM_LIBRARY if st.checkbox(ptm)]
 
 if sequence:
-    tokens = parse_sequence(sequence.upper())
+    clean_tokens, custom_positions, raw_tokens = parse_sequence(sequence.upper())
 
     masses = []
-    for t in tokens:
-        if t in AA_MASS:
-            masses.append(AA_MASS[t])
-        else:
-            row = custom_df[custom_df["code"] == t]
+    for t in raw_tokens:
+        if t.startswith("("):
+            code = t[1:-1]
+            row = custom_df[custom_df["code"] == code]
             if row.empty:
-                st.error(f"Unknown residue: {t}")
+                st.error(f"Unknown residue: {code}")
                 st.stop()
             masses.append(row.iloc[0]["mass"])
+        else:
+            masses.append(AA_MASS[t])
 
     total_ptm_shift = sum(PTM_LIBRARY[p] for p in selected_ptms)
     neutral_mass = sum(masses) + H2O + total_ptm_shift
@@ -322,6 +312,14 @@ if sequence:
     st.plotly_chart(fig, width="stretch")
 
     st.subheader("Peptide structure")
-    st.write("Custom AAs are shown as cyclobutane sidechains, PTMs are not shown.")
-    visual_mol = build_visual_peptide(tokens, custom_df)
-    st.image(Draw.MolToImage(visual_mol, size=(700,300)))
+    structure_mol, highlight_atoms = build_structure(clean_tokens, custom_positions)
+
+    if structure_mol:
+        img = Draw.MolToImage(
+            structure_mol,
+            size=(900,300),
+            highlightAtoms=highlight_atoms,
+            highlightColor=(1,0,0)
+        )
+        st.image(img)
+        st.write("Red α-carbon = custom residue")
