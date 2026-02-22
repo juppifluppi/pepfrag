@@ -1,178 +1,173 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
 import re
-from rdkit import Chem
-from rdkit.Chem import Draw, AllChem
-from rdkit.Chem.Descriptors import ExactMolWt
-from streamlit_ketcher import st_ketcher
+import plotly.graph_objects as go
 
 PROTON = 1.007276
-DB_NAME = "amino_acids.db"
+H2O = 18.01056
+NH3 = 17.02655
+
+# -----------------------------
+# Standard Amino Acid Monoisotopic Masses
+# -----------------------------
+AA_MASS = {
+    "A": 71.03711,
+    "R": 156.10111,
+    "N": 114.04293,
+    "D": 115.02694,
+    "C": 103.00919,
+    "E": 129.04259,
+    "Q": 128.05858,
+    "G": 57.02146,
+    "H": 137.05891,
+    "I": 113.08406,
+    "L": 113.08406,
+    "K": 128.09496,
+    "M": 131.04049,
+    "F": 147.06841,
+    "P": 97.05276,
+    "S": 87.03203,
+    "T": 101.04768,
+    "W": 186.07931,
+    "Y": 163.06333,
+    "V": 99.06841,
+}
+
+# -----------------------------
+# PTM Library
+# -----------------------------
+PTM_LIBRARY = {
+    "Phospho": 79.966331,
+    "Oxidation": 15.994915,
+    "Acetyl (N-term)": 42.010565,
+    "Amidation (C-term)": -0.984016,
+}
 
 # -----------------------------
 # Sequence Parser
 # -----------------------------
 def parse_sequence(seq):
-    tokens = re.findall(r'\([A-Za-z0-9]+\)|[A-Z]', seq)
-    cleaned = []
-    for t in tokens:
-        if t.startswith("("):
-            cleaned.append(t[1:-1])
+    return re.findall(r'[A-Z]', seq)
+
+# -----------------------------
+# Apply PTMs
+# -----------------------------
+def apply_ptms(masses, ptm_selection):
+    for ptm in ptm_selection:
+        if "N-term" in ptm:
+            masses[0] += PTM_LIBRARY[ptm]
+        elif "C-term" in ptm:
+            masses[-1] += PTM_LIBRARY[ptm]
         else:
-            cleaned.append(t)
-    return cleaned
+            # apply to all possible residues (simplified)
+            for i in range(len(masses)):
+                masses[i] += PTM_LIBRARY[ptm]
+    return masses
 
 # -----------------------------
-# Database
+# Fragment Engine
 # -----------------------------
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS amino_acids (
-            code TEXT PRIMARY KEY,
-            name TEXT,
-            smiles TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+def generate_fragments(sequence, ptms):
+    residues = parse_sequence(sequence)
 
-def load_amino_acids():
-    conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query("SELECT * FROM amino_acids", conn)
-    conn.close()
-    return df
+    if not all(r in AA_MASS for r in residues):
+        return None
 
-def save_amino_acid(code, name, smiles):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("REPLACE INTO amino_acids VALUES (?, ?, ?)",
-              (code.upper(), name, smiles))
-    conn.commit()
-    conn.close()
+    masses = [AA_MASS[r] for r in residues]
+    masses = apply_ptms(masses, ptms)
 
-# -----------------------------
-# Amide Coupling Reaction
-# -----------------------------
-amide_rxn = AllChem.ReactionFromSmarts(
-    "[C:1](=O)[O;H].[N;H2:2]>>[C:1](=O)[N:2]"
-)
-
-def couple_amino_acids(mol1, mol2):
-    products = amide_rxn.RunReactants((mol1, mol2))
-    if products:
-        return products[0][0]
-    return None
-
-# -----------------------------
-# Build Peptide
-# -----------------------------
-def build_peptide(tokens, aa_df):
-    mol = None
-    for token in tokens:
-        row = aa_df[aa_df["code"] == token]
-        if row.empty:
-            return None
-        aa_mol = Chem.MolFromSmiles(row.iloc[0]["smiles"])
-        if mol is None:
-            mol = aa_mol
-        else:
-            mol = couple_amino_acids(mol, aa_mol)
-    return mol
-
-# -----------------------------
-# Fragment Generation
-# -----------------------------
-def generate_fragments(tokens, aa_df):
     fragments = []
 
-    for i in range(1, len(tokens)):
-        # b-ion
-        b_tokens = tokens[:i]
-        b_mol = build_peptide(b_tokens, aa_df)
-        b_mass = ExactMolWt(b_mol)
+    # b-ions
+    running = 0
+    for i in range(len(masses)-1):
+        running += masses[i]
+        b_mass = running + PROTON
+        fragments.append(("b"+str(i+1), b_mass))
 
-        # y-ion
-        y_tokens = tokens[i:]
-        y_mol = build_peptide(y_tokens, aa_df)
-        y_mass = ExactMolWt(y_mol)
+        fragments.append(("b"+str(i+1)+"-H2O", b_mass - H2O))
+        fragments.append(("b"+str(i+1)+"-NH3", b_mass - NH3))
 
-        fragments.append(("b" + str(i), b_mass))
-        fragments.append(("y" + str(len(tokens) - i), y_mass))
+    # y-ions
+    running = 0
+    for i in range(len(masses)-1):
+        running += masses[-(i+1)]
+        y_mass = running + PROTON + H2O
+        fragments.append(("y"+str(i+1), y_mass))
+
+        fragments.append(("y"+str(i+1)+"-H2O", y_mass - H2O))
+        fragments.append(("y"+str(i+1)+"-NH3", y_mass - NH3))
 
     return fragments
 
-def compute_mz(mass, charge):
-    return (mass + charge * PROTON) / charge
+# -----------------------------
+# Charge State m/z
+# -----------------------------
+def compute_mz(mass, z):
+    return (mass + z*PROTON) / z
 
-def build_fragment_table(fragments):
+# -----------------------------
+# Build Table
+# -----------------------------
+def build_table(fragments):
     rows = []
     for name, mass in fragments:
         row = {
             "Fragment": name,
-            "z=1": round(compute_mz(mass, 1), 4),
-            "z=2": round(compute_mz(mass, 2), 4),
-            "z=3": round(compute_mz(mass, 3), 4),
-            "z=4": round(compute_mz(mass, 4), 4),
-            "z=5": round(compute_mz(mass, 5), 4),
+            "z=1": round(compute_mz(mass,1),4),
+            "z=2": round(compute_mz(mass,2),4),
+            "z=3": round(compute_mz(mass,3),4),
+            "z=4": round(compute_mz(mass,4),4),
+            "z=5": round(compute_mz(mass,5),4),
         }
         rows.append(row)
     return pd.DataFrame(rows)
 
 # -----------------------------
-# Streamlit UI
+# Spectrum Plot
 # -----------------------------
-st.title("Peptide MS Fragmentation Tool")
-st.markdown("Use format: `ACD(ORN)K`")
+def plot_spectrum(fragments):
+    mz = [compute_mz(mass,1) for _, mass in fragments]
+    intensity = [100 if "-" not in name else 40 for name,_ in fragments]
+    labels = [name for name,_ in fragments]
 
-init_db()
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=mz, y=intensity, text=labels))
+    fig.update_layout(
+        title="Simulated MS/MS Spectrum (1+)",
+        xaxis_title="m/z",
+        yaxis_title="Intensity",
+        showlegend=False
+    )
+    return fig
 
-# Sidebar: Custom AA
-st.sidebar.header("Add Custom Amino Acid (3-letter code)")
-code = st.sidebar.text_input("Code (e.g., ORN)")
-name = st.sidebar.text_input("Name")
-smiles = st_ketcher()
+# -----------------------------
+# UI
+# -----------------------------
+st.title("🔬 Research-Grade Peptide MS/MS Engine")
 
-if st.sidebar.button("Save Custom AA"):
-    mol = Chem.MolFromSmiles(smiles)
-    if mol:
-        save_amino_acid(code, name, smiles)
-        st.sidebar.success("Saved successfully.")
-    else:
-        st.sidebar.error("Invalid structure.")
+sequence = st.text_input("Peptide Sequence (1-letter code)")
 
-aa_df = load_amino_acids()
-
-# Main sequence input
-sequence = st.text_input("Peptide Sequence").upper()
+st.subheader("🧬 Select PTMs")
+ptms = st.multiselect("Choose Modifications", list(PTM_LIBRARY.keys()))
 
 if sequence:
-    tokens = parse_sequence(sequence)
-    mol = build_peptide(tokens, aa_df)
+    fragments = generate_fragments(sequence.upper(), ptms)
 
-    if mol:
-        neutral_mass = ExactMolWt(mol)
+    if fragments:
+        st.subheader("📊 Fragment Table")
+        table = build_table(fragments)
+        st.dataframe(table)
 
-        st.subheader("Peptide Neutral Mass")
-        st.write(round(neutral_mass, 4))
-
-        st.subheader("Peptide Structure")
-        img = Draw.MolToImage(mol)
-        st.image(img)
-
-        st.subheader("b / y Fragment Table (m/z)")
-        fragments = generate_fragments(tokens, aa_df)
-        frag_table = build_fragment_table(fragments)
-        st.dataframe(frag_table)
-
-        csv = frag_table.to_csv(index=False)
         st.download_button(
-            "Download Fragment Table",
-            csv,
-            "fragments.csv",
-            "text/csv"
+            "Download CSV",
+            table.to_csv(index=False),
+            "fragments.csv"
         )
+
+        st.subheader("📈 Simulated Spectrum")
+        fig = plot_spectrum(fragments)
+        st.plotly_chart(fig, use_container_width=True)
+
     else:
-        st.error("Invalid sequence or undefined amino acid.")
+        st.error("Invalid sequence.")
