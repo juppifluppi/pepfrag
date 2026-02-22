@@ -189,30 +189,40 @@ with st.sidebar.expander("Custom Amino Acid Manager", expanded=False):
     st.markdown("Draw full free amino acid structure.")
 
     code = st.text_input("3-letter Code")
+
     structure = st_ketcher(height=250)
 
     if st.button("Save Custom AA"):
 
-        if not structure:
-            st.error("No structure detected. Please draw and apply structure first.")
+        if not code:
+            st.error("Please provide a 3-letter code.")
+            st.stop()
+
+        if structure is None or structure == "" or structure == {}:
+            st.error("No structure detected. After drawing, click 'Apply' inside the drawer.")
             st.stop()
 
         mol = None
 
-        # If dict (modern ketcher)
+        # If dict (newer Ketcher)
         if isinstance(structure, dict):
             smiles = structure.get("smiles", "")
+            molfile = structure.get("molfile", "")
+
             if smiles:
                 mol = Chem.MolFromSmiles(smiles)
 
-        # If string (older version)
+            if mol is None and molfile:
+                mol = Chem.MolFromMolBlock(molfile)
+
+        # If string (older Ketcher)
         elif isinstance(structure, str):
             mol = Chem.MolFromMolBlock(structure)
             if mol is None:
                 mol = Chem.MolFromSmiles(structure)
 
         if mol is None:
-            st.error("Structure could not be parsed.")
+            st.error("Structure parsing failed.")
             st.stop()
 
         try:
@@ -229,7 +239,7 @@ with st.sidebar.expander("Custom Amino Acid Manager", expanded=False):
             conn.commit()
             conn.close()
 
-            st.success(f"Saved. Mass = {round(mass,4)}")
+            st.success(f"Saved successfully. Mass = {round(mass,4)}")
 
         except Exception as e:
             st.error(f"RDKit sanitization failed: {e}")
