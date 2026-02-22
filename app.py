@@ -189,24 +189,50 @@ with st.sidebar.expander("Custom Amino Acid Manager", expanded=False):
     st.markdown("Draw full free amino acid structure.")
 
     code = st.text_input("3-letter Code")
-    molblock = st_ketcher(height=250)
+    structure = st_ketcher(height=250)
 
     if st.button("Save Custom AA"):
-        if save_custom(code, molblock):
-            st.success("Saved successfully.")
-        else:
-            st.error("Invalid structure.")
 
-    st.subheader("Database")
+        if not structure:
+            st.error("No structure detected. Please draw and apply structure first.")
+            st.stop()
 
-    for _, row in custom_df.iterrows():
-        col1, col2 = st.columns([4,1])
-        col1.markdown(
-            f"**{row['code']}**  \nMass: {round(row['mass'],4)}  \n`{row['smiles']}`"
-        )
-        if col2.button("Delete", key=row["code"]):
-            delete_custom(row["code"])
-            st.rerun()
+        mol = None
+
+        # If dict (modern ketcher)
+        if isinstance(structure, dict):
+            smiles = structure.get("smiles", "")
+            if smiles:
+                mol = Chem.MolFromSmiles(smiles)
+
+        # If string (older version)
+        elif isinstance(structure, str):
+            mol = Chem.MolFromMolBlock(structure)
+            if mol is None:
+                mol = Chem.MolFromSmiles(structure)
+
+        if mol is None:
+            st.error("Structure could not be parsed.")
+            st.stop()
+
+        try:
+            Chem.SanitizeMol(mol)
+            mass = ExactMolWt(mol)
+            smiles = Chem.MolToSmiles(mol)
+
+            conn = sqlite3.connect(DB)
+            c = conn.cursor()
+            c.execute(
+                "REPLACE INTO custom_aa VALUES (?, ?, ?)",
+                (code.upper(), smiles, mass)
+            )
+            conn.commit()
+            conn.close()
+
+            st.success(f"Saved. Mass = {round(mass,4)}")
+
+        except Exception as e:
+            st.error(f"RDKit sanitization failed: {e}")
 
 # =============================
 # Main Interface
