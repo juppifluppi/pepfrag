@@ -221,6 +221,16 @@ with st.expander("Draw and Save Custom Amino Acid", expanded=False):
 with st.sidebar:
     st.subheader("Custom AA Database")
 
+    search_term = st.text_input("Search custom AA")
+
+    if search_term:
+        filtered_df = custom_df[
+            custom_df["code"].str.contains(search_term, case=False, na=False) |
+            custom_df["description"].str.contains(search_term, case=False, na=False)
+        ]
+    else:
+        filtered_df = custom_df
+
     for _, row in custom_df.iterrows():
         st.markdown(f"### {row['code']}")
         st.write(f"Mass: {round(row['mass'],4)}")
