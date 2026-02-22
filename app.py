@@ -218,7 +218,7 @@ with st.expander("Draw and save custom amino acid", expanded=False):
 # Sidebar Database
 # -----------------------------
 with st.sidebar:
-    st.subheader("Custom AA Database")
+    st.subheader("Custom AA database")
 
     # --- Search ---
     search_term = st.text_input("Search custom AA")
@@ -252,10 +252,10 @@ with st.sidebar:
 # -----------------------------
 # Peptide Analysis
 # -----------------------------
-sequence = st.text_input("Peptide Sequence (e.g., ACD(ORN)K)")
+sequence = st.text_input("Peptide sequence (use 1-letter codes for standard and 3-letter codes for custom AAs from the database, e.g. ACD(ORN)K)")
 include_losses = st.checkbox("Include neutral losses (-H2O / -NH3)", value=True)
 
-st.subheader("PTM Quick Toggles")
+st.write("PTM toggles:")
 selected_ptms = [ptm for ptm in PTM_LIBRARY if st.checkbox(ptm)]
 
 if sequence:
@@ -283,7 +283,7 @@ if sequence:
 
     fragments = generate_fragments(masses, include_losses)
 
-    st.subheader("Fragment Table")
+    st.subheader("Fragment table")
     st.dataframe(pd.DataFrame([
         {
             "Fragment": name,
@@ -296,7 +296,7 @@ if sequence:
         for name,m in fragments
     ]))
 
-    st.subheader("Simulated MS/MS Spectrum")
+    st.subheader("MS/MS spectrum")
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=[compute_mz(m + total_ptm_shift,1) for _,m in fragments],
@@ -305,6 +305,7 @@ if sequence:
     ))
     st.plotly_chart(fig, width="stretch")
 
-    st.subheader("Peptide Structure Preview")
+    st.subheader("Peptide structure")
+    st.write("Custom AAs are shown as cyclobutane sidechains")
     visual_mol = build_visual_peptide(tokens, custom_df)
     st.image(Draw.MolToImage(visual_mol, size=(700,300)))
