@@ -203,11 +203,12 @@ custom_df = load_custom()
 
 with st.expander("Draw and save custom amino acid", expanded=False):
 
-    code = st.text_input("3-letter Code")
+    st.write("After drawing and providing a 3-letter code, click on "Apply" and then on "Save AA" to permanently add a custom AA to the database. Adding a description helps when searching the database.")
+    code = st.text_input("3-letter code")
     description = st.text_input("Description (optional)")
     structure = st_ketcher(height=500)
 
-    if st.button("Save Custom AA"):
+    if st.button("Save AA"):
         if save_custom(code, structure, description):
             st.success("Custom amino acid saved.")
             st.rerun()
