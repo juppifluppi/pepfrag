@@ -1,22 +1,31 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
+import re
 from rdkit import Chem
-from rdkit.Chem import Draw
+from rdkit.Chem import Draw, AllChem
 from rdkit.Chem.Descriptors import ExactMolWt
-import io
+from streamlit_ketcher import st_ketcher
 
-# -------------------------
-# Constants
-# -------------------------
 PROTON = 1.007276
-WATER = 18.01056
-
 DB_NAME = "amino_acids.db"
 
-# -------------------------
-# Database Setup
-# -------------------------
+# -----------------------------
+# Sequence Parser
+# -----------------------------
+def parse_sequence(seq):
+    tokens = re.findall(r'\([A-Za-z0-9]+\)|[A-Z]', seq)
+    cleaned = []
+    for t in tokens:
+        if t.startswith("("):
+            cleaned.append(t[1:-1])
+        else:
+            cleaned.append(t)
+    return cleaned
+
+# -----------------------------
+# Database
+# -----------------------------
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -24,25 +33,11 @@ def init_db():
         CREATE TABLE IF NOT EXISTS amino_acids (
             code TEXT PRIMARY KEY,
             name TEXT,
-            smiles TEXT,
-            mass REAL
+            smiles TEXT
         )
     """)
     conn.commit()
     conn.close()
-
-def add_amino_acid(code, name, smiles):
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        return False
-    mass = ExactMolWt(mol)
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("REPLACE INTO amino_acids VALUES (?, ?, ?, ?)",
-              (code.upper(), name, smiles, mass))
-    conn.commit()
-    conn.close()
-    return True
 
 def load_amino_acids():
     conn = sqlite3.connect(DB_NAME)
@@ -50,143 +45,134 @@ def load_amino_acids():
     conn.close()
     return df
 
-# -------------------------
-# Default 20 Amino Acids
-# -------------------------
-def load_default_amino_acids():
-    defaults = {
-        "A": ("Alanine", "CC(N)C(=O)O"),
-        "G": ("Glycine", "NCC(=O)O"),
-        "S": ("Serine", "N[C@@H](CO)C(=O)O"),
-        "P": ("Proline", "N1CCCC1C(=O)O"),
-        "V": ("Valine", "CC(C)C(N)C(=O)O"),
-        "T": ("Threonine", "CC(O)C(N)C(=O)O"),
-        "C": ("Cysteine", "N[C@@H](CS)C(=O)O"),
-        "L": ("Leucine", "CC(C)CC(N)C(=O)O"),
-        "I": ("Isoleucine", "CC[C@H](C)[C@H](N)C(=O)O"),
-        "N": ("Asparagine", "NC(=O)C(N)C(=O)O"),
-        "D": ("Aspartic Acid", "NC(CC(=O)O)C(=O)O"),
-        "Q": ("Glutamine", "NC(=O)CCC(N)C(=O)O"),
-        "K": ("Lysine", "NCCCC[C@H](N)C(=O)O"),
-        "E": ("Glutamic Acid", "NC(CCC(=O)O)C(=O)O"),
-        "M": ("Methionine", "CSCCC(N)C(=O)O"),
-        "H": ("Histidine", "NC(Cc1c[nH]cn1)C(=O)O"),
-        "F": ("Phenylalanine", "NC(Cc1ccccc1)C(=O)O"),
-        "R": ("Arginine", "NC(CCCNC(N)=N)C(=O)O"),
-        "Y": ("Tyrosine", "NC(Cc1ccc(O)cc1)C(=O)O"),
-        "W": ("Tryptophan", "NC(Cc1c[nH]c2ccccc12)C(=O)O"),
-    }
+def save_amino_acid(code, name, smiles):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("REPLACE INTO amino_acids VALUES (?, ?, ?)",
+              (code.upper(), name, smiles))
+    conn.commit()
+    conn.close()
 
-    for code, (name, smiles) in defaults.items():
-        add_amino_acid(code, name, smiles)
+# -----------------------------
+# Amide Coupling Reaction
+# -----------------------------
+amide_rxn = AllChem.ReactionFromSmarts(
+    "[C:1](=O)[O;H].[N;H2:2]>>[C:1](=O)[N:2]"
+)
 
-# -------------------------
-# Peptide Mass Calculation
-# -------------------------
-def calculate_peptide(sequence, aa_df):
-    total = 0
-    for aa in sequence:
-        row = aa_df[aa_df["code"] == aa]
+def couple_amino_acids(mol1, mol2):
+    products = amide_rxn.RunReactants((mol1, mol2))
+    if products:
+        return products[0][0]
+    return None
+
+# -----------------------------
+# Build Peptide
+# -----------------------------
+def build_peptide(tokens, aa_df):
+    mol = None
+    for token in tokens:
+        row = aa_df[aa_df["code"] == token]
         if row.empty:
             return None
-        total += row.iloc[0]["mass"]
+        aa_mol = Chem.MolFromSmiles(row.iloc[0]["smiles"])
+        if mol is None:
+            mol = aa_mol
+        else:
+            mol = couple_amino_acids(mol, aa_mol)
+    return mol
 
-    neutral = total + WATER
-    protonated = neutral + PROTON
-    return neutral, protonated
-
-def calculate_fragments(sequence, aa_df):
+# -----------------------------
+# Fragment Generation
+# -----------------------------
+def generate_fragments(tokens, aa_df):
     fragments = []
-    for i in range(1, len(sequence)):
-        b_seq = sequence[:i]
-        y_seq = sequence[i:]
 
-        b_mass = calculate_peptide(b_seq, aa_df)[1]
-        y_mass = calculate_peptide(y_seq, aa_df)[1]
+    for i in range(1, len(tokens)):
+        # b-ion
+        b_tokens = tokens[:i]
+        b_mol = build_peptide(b_tokens, aa_df)
+        b_mass = ExactMolWt(b_mol)
 
-        fragments.append(("b"+str(i), b_mass))
-        fragments.append(("y"+str(len(sequence)-i), y_mass))
+        # y-ion
+        y_tokens = tokens[i:]
+        y_mol = build_peptide(y_tokens, aa_df)
+        y_mass = ExactMolWt(y_mol)
 
-    return pd.DataFrame(fragments, columns=["Fragment", "m/z (1+)"])
+        fragments.append(("b" + str(i), b_mass))
+        fragments.append(("y" + str(len(tokens) - i), y_mass))
 
-# -------------------------
-# Build Peptide SMILES
-# -------------------------
-def sequence_to_smiles(sequence, aa_df):
-    smiles_list = []
-    for aa in sequence:
-        row = aa_df[aa_df["code"] == aa]
-        if row.empty:
-            return None
-        smiles_list.append(row.iloc[0]["smiles"])
+    return fragments
 
-    return ".".join(smiles_list)  # Simplified concatenation
+def compute_mz(mass, charge):
+    return (mass + charge * PROTON) / charge
 
-# -------------------------
+def build_fragment_table(fragments):
+    rows = []
+    for name, mass in fragments:
+        row = {
+            "Fragment": name,
+            "z=1": round(compute_mz(mass, 1), 4),
+            "z=2": round(compute_mz(mass, 2), 4),
+            "z=3": round(compute_mz(mass, 3), 4),
+            "z=4": round(compute_mz(mass, 4), 4),
+            "z=5": round(compute_mz(mass, 5), 4),
+        }
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+# -----------------------------
 # Streamlit UI
-# -------------------------
-st.title("Peptide MS Fractionation Tool")
+# -----------------------------
+st.title("Peptide MS Fragmentation Tool")
+st.markdown("Use format: `ACD(ORN)K`")
 
 init_db()
-load_default_amino_acids()
+
+# Sidebar: Custom AA
+st.sidebar.header("Add Custom Amino Acid (3-letter code)")
+code = st.sidebar.text_input("Code (e.g., ORN)")
+name = st.sidebar.text_input("Name")
+smiles = st_ketcher()
+
+if st.sidebar.button("Save Custom AA"):
+    mol = Chem.MolFromSmiles(smiles)
+    if mol:
+        save_amino_acid(code, name, smiles)
+        st.sidebar.success("Saved successfully.")
+    else:
+        st.sidebar.error("Invalid structure.")
+
 aa_df = load_amino_acids()
 
-# Sidebar: Add Custom Amino Acid
-st.sidebar.header("Add Custom Amino Acid")
-
-code = st.sidebar.text_input("1-letter Code")
-name = st.sidebar.text_input("Name")
-smiles = st.sidebar.text_input("SMILES")
-
-if st.sidebar.button("Add / Update"):
-    if add_amino_acid(code, name, smiles):
-        st.sidebar.success("Added successfully!")
-    else:
-        st.sidebar.error("Invalid SMILES")
-
-st.sidebar.write("Current Amino Acids:")
-st.sidebar.dataframe(aa_df[["code", "name"]])
-
-# Main App
-sequence = st.text_input("Enter Peptide Sequence").upper()
-
-charge = st.slider("Charge State (z)", 1, 5, 1)
+# Main sequence input
+sequence = st.text_input("Peptide Sequence").upper()
 
 if sequence:
-    result = calculate_peptide(sequence, aa_df)
-    if result is None:
-        st.error("Invalid amino acid in sequence.")
-    else:
-        neutral, protonated = result
+    tokens = parse_sequence(sequence)
+    mol = build_peptide(tokens, aa_df)
 
-        mz = (neutral + charge * PROTON) / charge
+    if mol:
+        neutral_mass = ExactMolWt(mol)
 
-        st.subheader("Mass Results")
-        st.write("Neutral Mass:", round(neutral, 4))
-        st.write("[M+H]+:", round(protonated, 4))
-        st.write("m/z (z={})".format(charge), round(mz, 4))
-        st.write("Mol/2:", round(protonated/2, 4))
-        st.write("Mol/3:", round(protonated/3, 4))
+        st.subheader("Peptide Neutral Mass")
+        st.write(round(neutral_mass, 4))
 
-        # Fragments
-        st.subheader("b/y Ion Series (1+)")
-        frag_df = calculate_fragments(sequence, aa_df)
-        st.dataframe(frag_df)
+        st.subheader("Peptide Structure")
+        img = Draw.MolToImage(mol)
+        st.image(img)
 
-        # CSV Export
-        csv = frag_df.to_csv(index=False)
+        st.subheader("b / y Fragment Table (m/z)")
+        fragments = generate_fragments(tokens, aa_df)
+        frag_table = build_fragment_table(fragments)
+        st.dataframe(frag_table)
+
+        csv = frag_table.to_csv(index=False)
         st.download_button(
-            label="Download Fragment Table CSV",
-            data=csv,
-            file_name="fragments.csv",
-            mime="text/csv"
+            "Download Fragment Table",
+            csv,
+            "fragments.csv",
+            "text/csv"
         )
-
-        # Structure Rendering
-        st.subheader("Structure (Simplified View)")
-        smiles = sequence_to_smiles(sequence, aa_df)
-        if smiles:
-            mol = Chem.MolFromSmiles(smiles)
-            if mol:
-                img = Draw.MolToImage(mol)
-                st.image(img)
+    else:
+        st.error("Invalid sequence or undefined amino acid.")
