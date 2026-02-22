@@ -4,3 +4,4 @@ stmol
 pandas
 matplotlib
 streamlit-ketcher
+plotly
