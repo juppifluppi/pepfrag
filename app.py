@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from rdkit import Chem
 from rdkit.Chem import Draw
 from rdkit.Chem.Descriptors import ExactMolWt
+from streamlit_ketcher import st_ketcher
 
 # =============================
 # Constants
@@ -16,29 +17,29 @@ NH3 = 17.02655
 DB = "aa_database.db"
 
 # =============================
-# Default Residue Masses
+# Default Sidechains
 # =============================
-DEFAULT_AA = {
-    "A": 71.03711,
-    "R": 156.10111,
-    "N": 114.04293,
-    "D": 115.02694,
-    "C": 103.00919,
-    "E": 129.04259,
-    "Q": 128.05858,
-    "G": 57.02146,
-    "H": 137.05891,
-    "I": 113.08406,
-    "L": 113.08406,
-    "K": 128.09496,
-    "M": 131.04049,
-    "F": 147.06841,
-    "P": 97.05276,
-    "S": 87.03203,
-    "T": 101.04768,
-    "W": 186.07931,
-    "Y": 163.06333,
-    "V": 99.06841,
+DEFAULT_SIDECHAINS = {
+    "A": "C",
+    "R": "CCCNC(N)=N",
+    "N": "CC(=O)N",
+    "D": "CC(=O)O",
+    "C": "CS",
+    "E": "CCC(=O)O",
+    "Q": "CCC(=O)N",
+    "G": "[H]",
+    "H": "Cc1c[nH]cn1",
+    "I": "C(C)CC",
+    "L": "CC(C)C",
+    "K": "CCCCN",
+    "M": "CCSC",
+    "F": "Cc1ccccc1",
+    "P": "CCC",
+    "S": "CO",
+    "T": "C(O)C",
+    "W": "Cc1c[nH]c2ccccc12",
+    "Y": "Cc1ccc(O)cc1",
+    "V": "C(C)C",
 }
 
 # =============================
@@ -47,16 +48,10 @@ DEFAULT_AA = {
 def init_db():
     conn = sqlite3.connect(DB)
     c = conn.cursor()
-
-    c.execute("PRAGMA table_info(custom_aa)")
-    columns = [col[1] for col in c.fetchall()]
-    if "mass" not in columns:
-        c.execute("DROP TABLE IF EXISTS custom_aa")
-
     c.execute("""
         CREATE TABLE IF NOT EXISTS custom_aa (
             code TEXT PRIMARY KEY,
-            mass REAL
+            sidechain TEXT
         )
     """)
     conn.commit()
@@ -68,11 +63,11 @@ def load_custom():
     conn.close()
     return df
 
-def save_custom(code, mass):
+def save_custom(code, sidechain):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("REPLACE INTO custom_aa VALUES (?, ?)",
-              (code.upper(), mass))
+              (code.upper(), sidechain))
     conn.commit()
     conn.close()
 
@@ -91,12 +86,66 @@ def parse_sequence(seq):
     return [t[1:-1] if t.startswith("(") else t for t in tokens]
 
 # =============================
-# Fragmentation Engine
+# Build Single Residue
+# =============================
+def build_residue(sidechain_smiles):
+    backbone = Chem.MolFromSmiles("N[C@@H](*)C(=O)O")
+    sidechain = Chem.MolFromSmiles(sidechain_smiles)
+
+    rw = Chem.RWMol(backbone)
+    star_idx = None
+
+    for atom in rw.GetAtoms():
+        if atom.GetSymbol() == "*":
+            star_idx = atom.GetIdx()
+            break
+
+    offset = rw.GetNumAtoms()
+    rw.InsertMol(sidechain)
+
+    rw.AddBond(star_idx, offset, Chem.rdchem.BondType.SINGLE)
+    rw.RemoveAtom(star_idx)
+
+    mol = rw.GetMol()
+    Chem.SanitizeMol(mol)
+    return mol
+
+# =============================
+# Couple Residues (Amide Bond)
+# =============================
+def couple_residues(m1, m2):
+    rw = Chem.RWMol(Chem.CombineMols(m1, m2))
+    Chem.SanitizeMol(rw)
+
+    # Find C-terminal carbonyl carbon of m1
+    carbonyl = None
+    for atom in rw.GetAtoms():
+        if atom.GetSymbol() == "C":
+            for nbr in atom.GetNeighbors():
+                if nbr.GetSymbol() == "O":
+                    carbonyl = atom.GetIdx()
+                    break
+
+    # Find N-terminal nitrogen of m2
+    nitrogen = None
+    for atom in rw.GetAtoms():
+        if atom.GetSymbol() == "N":
+            nitrogen = atom.GetIdx()
+            break
+
+    rw.AddBond(carbonyl, nitrogen, Chem.rdchem.BondType.SINGLE)
+
+    mol = rw.GetMol()
+    Chem.SanitizeMol(mol)
+    return mol
+
+# =============================
+# Fragmentation (Mass-based)
 # =============================
 def generate_fragments(masses, include_losses):
     fragments = []
-
     running = 0
+
     for i in range(len(masses)-1):
         running += masses[i]
         b = running + PROTON
@@ -119,93 +168,88 @@ def generate_fragments(masses, include_losses):
 def compute_mz(mass, z):
     return (mass + z*PROTON)/z
 
-def build_table(fragments):
-    rows = []
-    for name, mass in fragments:
-        rows.append({
-            "Fragment": name,
-            "z=1": round(compute_mz(mass,1),4),
-            "z=2": round(compute_mz(mass,2),4),
-            "z=3": round(compute_mz(mass,3),4),
-            "z=4": round(compute_mz(mass,4),4),
-            "z=5": round(compute_mz(mass,5),4),
-        })
-    return pd.DataFrame(rows)
-
-def plot_spectrum(fragments):
-    mz = [compute_mz(m,1) for _,m in fragments]
-    intensity = [100 if "-" not in n else 40 for n,_ in fragments]
-    labels = [n for n,_ in fragments]
-
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=mz, y=intensity, text=labels))
-    fig.update_layout(
-        title="Simulated MS/MS Spectrum (1+)",
-        xaxis_title="m/z",
-        yaxis_title="Relative Intensity",
-        showlegend=False
-    )
-    return fig
-
 # =============================
 # UI
 # =============================
-st.title("🔬 Stable Peptide MS/MS Tool")
+st.title("🔬 Peptide MS/MS Research Tool")
 
 init_db()
 custom_df = load_custom()
 
 with st.sidebar.expander("Custom Amino Acid Manager", expanded=False):
+    st.markdown("Draw **sidechain only** (no backbone)")
     code = st.text_input("3-letter Code")
-    mass = st.number_input("Residue Mass (monoisotopic)", format="%.6f")
+    sidechain = st_ketcher(height=250)
 
     if st.button("Save Custom AA"):
-        save_custom(code, mass)
+        save_custom(code, sidechain)
         st.success("Saved.")
 
+    st.subheader("Database")
     for _, row in custom_df.iterrows():
         col1, col2 = st.columns([4,1])
-        col1.write(f"{row['code']}  ({row['mass']})")
+        col1.markdown(f"**{row['code']}**  `{row['sidechain']}`")
         if col2.button("Delete", key=row["code"]):
             delete_custom(row["code"])
             st.rerun()
 
 sequence = st.text_input("Peptide Sequence (e.g., ACD(ORN)K)")
-include_losses = st.checkbox("Include neutral losses (-H2O / -NH3)", value=True)
+include_losses = st.checkbox("Include neutral losses", value=True)
 
 if sequence:
     tokens = parse_sequence(sequence.upper())
-
+    residues = []
     masses = []
+
     for t in tokens:
-        if t in DEFAULT_AA:
-            masses.append(DEFAULT_AA[t])
+        if t in DEFAULT_SIDECHAINS:
+            sc = DEFAULT_SIDECHAINS[t]
         else:
             row = custom_df[custom_df["code"] == t]
             if row.empty:
                 st.error("Unknown residue.")
                 st.stop()
-            masses.append(row.iloc[0]["mass"])
+            sc = row.iloc[0]["sidechain"]
+
+        res = build_residue(sc)
+        residues.append(res)
+        masses.append(ExactMolWt(res) - H2O)
+
+    peptide = residues[0]
+    for r in residues[1:]:
+        peptide = couple_residues(peptide, r)
 
     neutral_mass = sum(masses) + H2O
 
     st.subheader("Precursor m/z")
-    precursor_df = pd.DataFrame({
+    st.dataframe(pd.DataFrame({
         "Charge":[1,2,3,4,5],
         "m/z":[round(compute_mz(neutral_mass,z),4) for z in range(1,6)]
-    })
-    st.dataframe(precursor_df)
+    }))
 
     fragments = generate_fragments(masses, include_losses)
 
     st.subheader("Fragment Table")
-    st.dataframe(build_table(fragments))
+    st.dataframe(pd.DataFrame([
+        {
+            "Fragment": name,
+            "z=1": round(compute_mz(m,1),4),
+            "z=2": round(compute_mz(m,2),4),
+            "z=3": round(compute_mz(m,3),4),
+            "z=4": round(compute_mz(m,4),4),
+            "z=5": round(compute_mz(m,5),4),
+        }
+        for name,m in fragments
+    ]))
 
-    st.subheader("Simulated MS/MS Spectrum")
-    st.plotly_chart(plot_spectrum(fragments), use_container_width=True)
+    st.subheader("Spectrum")
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=[compute_mz(m,1) for _,m in fragments],
+        y=[100 if "-" not in n else 40 for n,_ in fragments],
+        text=[n for n,_ in fragments]
+    ))
+    st.plotly_chart(fig, use_container_width=True)
 
-    # Simple backbone visualization only
-    st.subheader("Peptide Backbone Representation")
-    backbone = "N" + "C(=O)N"*len(tokens) + "C(=O)O"
-    mol = Chem.MolFromSmiles(backbone)
-    st.image(Draw.MolToImage(mol, size=(600,200)))
+    st.subheader("Full Peptide Structure")
+    st.image(Draw.MolToImage(peptide, size=(700,300)))
