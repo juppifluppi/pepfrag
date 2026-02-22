@@ -66,25 +66,37 @@ def load_custom():
     conn.close()
     return df
     
-def save_custom(code, structure_text):
-    if not code or not structure_text:
+def save_custom(code, structure):
+    if not code or not structure:
         return False
 
     mol = None
 
-    # Try MolBlock first
-    try:
-        mol = Chem.MolFromMolBlock(structure_text)
-    except:
-        mol = None
+    # Case 1 — structure is dict (new Ketcher)
+    if isinstance(structure, dict):
 
-    # If that fails, try SMILES
-    if mol is None:
-        try:
-            mol = Chem.MolFromSmiles(structure_text)
-        except:
-            mol = None
+        # Try SMILES first
+        smiles = structure.get("smiles", "")
+        if smiles:
+            mol = Chem.MolFromSmiles(smiles)
 
+        # If SMILES failed, try molfile
+        if mol is None:
+            molfile = structure.get("molfile", "")
+            if molfile:
+                mol = Chem.MolFromMolBlock(molfile)
+
+    # Case 2 — structure is string (older Ketcher)
+    elif isinstance(structure, str):
+
+        # Try MolBlock
+        mol = Chem.MolFromMolBlock(structure)
+
+        # If that fails, try SMILES
+        if mol is None:
+            mol = Chem.MolFromSmiles(structure)
+
+    # If still no molecule → invalid
     if mol is None:
         return False
 
@@ -101,7 +113,9 @@ def save_custom(code, structure_text):
         )
         conn.commit()
         conn.close()
+
         return True
+
     except:
         return False
 
