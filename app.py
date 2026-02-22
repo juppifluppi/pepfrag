@@ -28,21 +28,28 @@ AA_MASS = {
 }
 
 # =============================
+# PTM Library (Monoisotopic ΔMass)
+# =============================
+PTM_LIBRARY = {
+    "Phospho (S,T,Y)": 79.966331,
+    "Oxidation (M)": 15.994915,
+    "Acetyl (Protein N-term)": 42.010565,
+    "Carbamidomethyl (C)": 57.021464,
+}
+
+# =============================
 # Database
 # =============================
 def init_db():
     conn = sqlite3.connect(DB)
     c = conn.cursor()
 
-    # Check existing table structure
     c.execute("PRAGMA table_info(custom_aa)")
     columns = [col[1] for col in c.fetchall()]
 
-    # If schema is outdated, drop table
     if columns and ("smiles" not in columns or "mass" not in columns):
         c.execute("DROP TABLE IF EXISTS custom_aa")
 
-    # Create correct table
     c.execute("""
         CREATE TABLE IF NOT EXISTS custom_aa (
             code TEXT PRIMARY KEY,
@@ -50,7 +57,6 @@ def init_db():
             mass REAL
         )
     """)
-
     conn.commit()
     conn.close()
 
@@ -60,18 +66,26 @@ def load_custom():
     conn.close()
     return df
 
-def save_custom(code, smiles):
-    mol = Chem.MolFromSmiles(smiles)
-    if mol:
+def save_custom(code, molblock):
+    try:
+        mol = Chem.MolFromMolBlock(molblock)
+        if mol is None:
+            return False
+
         mass = ExactMolWt(mol)
+        smiles = Chem.MolToSmiles(mol)
+
         conn = sqlite3.connect(DB)
         c = conn.cursor()
-        c.execute("REPLACE INTO custom_aa VALUES (?, ?, ?)",
-                  (code.upper(), smiles, mass))
+        c.execute(
+            "REPLACE INTO custom_aa VALUES (?, ?, ?)",
+            (code.upper(), smiles, mass)
+        )
         conn.commit()
         conn.close()
         return True
-    return False
+    except:
+        return False
 
 def delete_custom(code):
     conn = sqlite3.connect(DB)
@@ -81,7 +95,7 @@ def delete_custom(code):
     conn.close()
 
 # =============================
-# Parse Sequence
+# Sequence Parser
 # =============================
 def parse_sequence(seq):
     tokens = re.findall(r'\([A-Za-z0-9]+\)|[A-Z]', seq)
@@ -91,7 +105,7 @@ def parse_sequence(seq):
     for t in tokens:
         if t.startswith("("):
             cleaned.append(t[1:-1])
-            fasta_seq += "X"  # placeholder in structure
+            fasta_seq += "A"  # placeholder for structure
         else:
             cleaned.append(t)
             fasta_seq += t
@@ -135,16 +149,18 @@ st.title("🔬 Peptide MS/MS Research Tool")
 init_db()
 custom_df = load_custom()
 
-# Sidebar Drawer Restored
+# =============================
+# Sidebar – Custom AA Manager
+# =============================
 with st.sidebar.expander("Custom Amino Acid Manager", expanded=False):
 
-    st.markdown("Draw full residue (free amino acid form).")
+    st.markdown("Draw full free amino acid structure.")
 
-    code = st.text_input("3-letter Code (e.g., ORN)")
-    smiles = st_ketcher(height=250)
+    code = st.text_input("3-letter Code")
+    molblock = st_ketcher(height=250)
 
     if st.button("Save Custom AA"):
-        if save_custom(code, smiles):
+        if save_custom(code, molblock):
             st.success("Saved successfully.")
         else:
             st.error("Invalid structure.")
@@ -153,30 +169,45 @@ with st.sidebar.expander("Custom Amino Acid Manager", expanded=False):
 
     for _, row in custom_df.iterrows():
         col1, col2 = st.columns([4,1])
-        col1.markdown(f"**{row['code']}**  \nMass: {round(row['mass'],4)}  \n`{row['smiles']}`")
+        col1.markdown(
+            f"**{row['code']}**  \nMass: {round(row['mass'],4)}  \n`{row['smiles']}`"
+        )
         if col2.button("Delete", key=row["code"]):
             delete_custom(row["code"])
             st.rerun()
 
+# =============================
 # Main Interface
+# =============================
 sequence = st.text_input("Peptide Sequence (e.g., ACD(ORN)K)")
 include_losses = st.checkbox("Include neutral losses (-H2O / -NH3)", value=True)
+
+st.subheader("PTM Quick Toggles")
+selected_ptms = []
+for ptm in PTM_LIBRARY:
+    if st.checkbox(ptm):
+        selected_ptms.append(ptm)
 
 if sequence:
     tokens, fasta_seq = parse_sequence(sequence.upper())
 
     masses = []
+
     for t in tokens:
         if t in AA_MASS:
-            masses.append(AA_MASS[t])
+            mass = AA_MASS[t]
         else:
             row = custom_df[custom_df["code"] == t]
             if row.empty:
                 st.error(f"Unknown residue: {t}")
                 st.stop()
-            masses.append(row.iloc[0]["mass"])
+            mass = row.iloc[0]["mass"]
 
-    neutral_mass = sum(masses) + H2O
+        masses.append(mass)
+
+    # Apply PTMs
+    total_ptm_shift = sum(PTM_LIBRARY[p] for p in selected_ptms)
+    neutral_mass = sum(masses) + H2O + total_ptm_shift
 
     st.subheader("Precursor m/z")
     st.dataframe(pd.DataFrame({
@@ -187,27 +218,32 @@ if sequence:
     fragments = generate_fragments(masses, include_losses)
 
     st.subheader("Fragment Table")
-    st.dataframe(pd.DataFrame([
+    frag_df = pd.DataFrame([
         {
             "Fragment": name,
-            "z=1": round(compute_mz(m,1),4),
-            "z=2": round(compute_mz(m,2),4),
-            "z=3": round(compute_mz(m,3),4),
-            "z=4": round(compute_mz(m,4),4),
-            "z=5": round(compute_mz(m,5),4),
+            "z=1": round(compute_mz(m + total_ptm_shift,1),4),
+            "z=2": round(compute_mz(m + total_ptm_shift,2),4),
+            "z=3": round(compute_mz(m + total_ptm_shift,3),4),
+            "z=4": round(compute_mz(m + total_ptm_shift,4),4),
+            "z=5": round(compute_mz(m + total_ptm_shift,5),4),
         }
         for name,m in fragments
-    ]))
+    ])
+    st.dataframe(frag_df)
 
     st.subheader("Simulated Spectrum")
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=[compute_mz(m,1) for _,m in fragments],
+        x=[compute_mz(m + total_ptm_shift,1) for _,m in fragments],
         y=[100 if "-" not in n else 40 for n,_ in fragments],
         text=[n for n,_ in fragments]
     ))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
-    st.subheader("Peptide Structure (Standard Residues Only)")
+    st.subheader("Peptide Structure Preview")
+
     mol = Chem.MolFromFASTA(fasta_seq)
-    st.image(Draw.MolToImage(mol, size=(700,300)))
+    if mol is not None:
+        st.image(Draw.MolToImage(mol, size=(700,300)))
+    else:
+        st.warning("Structure preview unavailable for this sequence.")
