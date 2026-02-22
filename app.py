@@ -17,7 +17,7 @@ NH3 = 17.02655
 DB = "aa_database.db"
 
 # =============================
-# Default Amino Acids (L-form)
+# Default Amino Acids
 # =============================
 DEFAULT_AA = {
     "A": ("N[C@@H](C)C(=O)O", 71.03711),
@@ -43,7 +43,7 @@ DEFAULT_AA = {
 }
 
 # =============================
-# Database
+# Database Functions
 # =============================
 def init_db():
     conn = sqlite3.connect(DB)
@@ -77,6 +77,13 @@ def save_custom_aa(code, smiles):
         return True
     return False
 
+def delete_custom_aa(code):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("DELETE FROM custom_aa WHERE code=?", (code,))
+    conn.commit()
+    conn.close()
+
 # =============================
 # Parser
 # =============================
@@ -85,7 +92,7 @@ def parse_sequence(seq):
     return [t[1:-1] if t.startswith("(") else t for t in tokens]
 
 # =============================
-# Amide Coupling Reaction
+# Peptide Builder
 # =============================
 amide_rxn = AllChem.ReactionFromSmarts(
     "[C:1](=O)[O;H].[N;H2:2]>>[C:1](=O)[N:2]"
@@ -97,9 +104,6 @@ def couple(m1, m2):
         return products[0][0]
     return None
 
-# =============================
-# Build Peptide Molecule
-# =============================
 def build_peptide(tokens, custom_df):
     mol = None
     masses = []
@@ -127,31 +131,33 @@ def build_peptide(tokens, custom_df):
 # =============================
 # Fragmentation
 # =============================
-def generate_fragments(masses):
+def generate_fragments(masses, include_losses):
     fragments = []
 
-    # b-ions
+    # b ions
     running = 0
     for i in range(len(masses)-1):
         running += masses[i]
         b = running + PROTON
         fragments.append(("b"+str(i+1), b))
-        fragments.append(("b"+str(i+1)+"-H2O", b - H2O))
-        fragments.append(("b"+str(i+1)+"-NH3", b - NH3))
+        if include_losses:
+            fragments.append(("b"+str(i+1)+"-H2O", b - H2O))
+            fragments.append(("b"+str(i+1)+"-NH3", b - NH3))
 
-    # y-ions
+    # y ions
     running = 0
     for i in range(len(masses)-1):
         running += masses[-(i+1)]
         y = running + PROTON + H2O
         fragments.append(("y"+str(i+1), y))
-        fragments.append(("y"+str(i+1)+"-H2O", y - H2O))
-        fragments.append(("y"+str(i+1)+"-NH3", y - NH3))
+        if include_losses:
+            fragments.append(("y"+str(i+1)+"-H2O", y - H2O))
+            fragments.append(("y"+str(i+1)+"-NH3", y - NH3))
 
     return fragments
 
 def compute_mz(mass, z):
-    return (mass + z*PROTON) / z
+    return (mass + z*PROTON)/z
 
 def build_table(fragments):
     rows = []
@@ -166,9 +172,6 @@ def build_table(fragments):
         })
     return pd.DataFrame(rows)
 
-# =============================
-# Spectrum
-# =============================
 def plot_spectrum(fragments):
     mz = [compute_mz(m,1) for _,m in fragments]
     intensity = [100 if "-" not in n else 40 for n,_ in fragments]
@@ -192,22 +195,31 @@ st.title("🔬 Publication-Level Peptide MS/MS Tool")
 init_db()
 custom_df = load_custom_aa()
 
-# Sidebar: Custom AA
-st.sidebar.header("Add Custom Amino Acid (3-letter code)")
-code = st.sidebar.text_input("Code (e.g., ORN)")
-smiles = st_ketcher(height=300)
+# Collapsible Custom AA Section
+with st.sidebar.expander("Custom Amino Acid Manager", expanded=False):
 
-if st.sidebar.button("Save Custom AA"):
-    if save_custom_aa(code, smiles):
-        st.sidebar.success("Saved successfully.")
-    else:
-        st.sidebar.error("Invalid structure.")
+    code = st.text_input("3-letter Code (e.g., ORN)")
+    smiles = st_ketcher(height=250)
 
-st.sidebar.subheader("Custom AA Database")
-st.sidebar.dataframe(custom_df)
+    if st.button("Save Custom AA"):
+        if save_custom_aa(code, smiles):
+            st.success("Saved successfully.")
+        else:
+            st.error("Invalid structure.")
 
-# Main sequence input
+    st.subheader("Database")
+
+    for _, row in custom_df.iterrows():
+        col1, col2 = st.columns([3,1])
+        col1.write(row["code"])
+        if col2.button("Delete", key=row["code"]):
+            delete_custom_aa(row["code"])
+            st.experimental_rerun()
+
+# Main
 sequence = st.text_input("Peptide Sequence (e.g., ACD(ORN)K)")
+
+include_losses = st.checkbox("Include neutral losses (-H2O / -NH3)", value=True)
 
 if sequence:
     tokens = parse_sequence(sequence.upper())
@@ -216,15 +228,16 @@ if sequence:
     if mol:
         neutral_mass = sum(masses) + H2O
 
-        st.subheader("Precursor m/z ([M+zH]z+)")
+        st.subheader("Precursor m/z")
         precursor_df = pd.DataFrame({
             "Charge": [1,2,3,4,5],
             "m/z": [round(compute_mz(neutral_mass,z),4) for z in range(1,6)]
         })
         st.dataframe(precursor_df)
 
-        st.subheader("b / y Fragment Table")
-        fragments = generate_fragments(masses)
+        fragments = generate_fragments(masses, include_losses)
+
+        st.subheader("Fragment Table")
         frag_table = build_table(fragments)
         st.dataframe(frag_table)
 
