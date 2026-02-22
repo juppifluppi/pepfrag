@@ -127,7 +127,7 @@ def build_visual_peptide(tokens, custom_df):
     backbone = Chem.RWMol()
     prev_c = None
 
-    for t in tokens:
+    for i, t in enumerate(tokens):
 
         # Backbone atoms
         n = backbone.AddAtom(Chem.Atom("N"))
@@ -139,22 +139,27 @@ def build_visual_peptide(tokens, custom_df):
         backbone.AddBond(ca, c, Chem.rdchem.BondType.SINGLE)
         backbone.AddBond(c, o, Chem.rdchem.BondType.DOUBLE)
 
+        # Connect previous residue (amide bond)
         if prev_c is not None:
             backbone.AddBond(prev_c, n, Chem.rdchem.BondType.SINGLE)
 
         prev_c = c
 
+        # Attach sidechain
         if t in AA_MASS:
-            # Standard residue → simple methyl sidechain
             sc = backbone.AddAtom(Chem.Atom("C"))
             backbone.AddBond(ca, sc, Chem.rdchem.BondType.SINGLE)
-
         else:
             # Custom residue → cyclobutane marker
             marker = Chem.MolFromSmiles("C1CCC1")
             offset = backbone.GetNumAtoms()
             backbone.InsertMol(marker)
             backbone.AddBond(ca, offset, Chem.rdchem.BondType.SINGLE)
+
+        # If this is the LAST residue → add terminal OH
+        if i == len(tokens) - 1:
+            o_term = backbone.AddAtom(Chem.Atom("O"))
+            backbone.AddBond(c, o_term, Chem.rdchem.BondType.SINGLE)
 
     mol = backbone.GetMol()
     Chem.SanitizeMol(mol)
