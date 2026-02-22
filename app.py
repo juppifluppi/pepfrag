@@ -17,29 +17,14 @@ NH3 = 17.02655
 DB = "aa_database.db"
 
 # =============================
-# Default Sidechains
+# Standard Residue Masses
 # =============================
-DEFAULT_SIDECHAINS = {
-    "A": "C",
-    "R": "CCCNC(N)=N",
-    "N": "CC(=O)N",
-    "D": "CC(=O)O",
-    "C": "CS",
-    "E": "CCC(=O)O",
-    "Q": "CCC(=O)N",
-    "G": "[H]",
-    "H": "Cc1c[nH]cn1",
-    "I": "C(C)CC",
-    "L": "CC(C)C",
-    "K": "CCCCN",
-    "M": "CCSC",
-    "F": "Cc1ccccc1",
-    "P": "CCC",
-    "S": "CO",
-    "T": "C(O)C",
-    "W": "Cc1c[nH]c2ccccc12",
-    "Y": "Cc1ccc(O)cc1",
-    "V": "C(C)C",
+AA_MASS = {
+    "A": 71.03711, "R": 156.10111, "N": 114.04293, "D": 115.02694,
+    "C": 103.00919, "E": 129.04259, "Q": 128.05858, "G": 57.02146,
+    "H": 137.05891, "I": 113.08406, "L": 113.08406, "K": 128.09496,
+    "M": 131.04049, "F": 147.06841, "P": 97.05276, "S": 87.03203,
+    "T": 101.04768, "W": 186.07931, "Y": 163.06333, "V": 99.06841,
 }
 
 # =============================
@@ -51,7 +36,7 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS custom_aa (
             code TEXT PRIMARY KEY,
-            sidechain TEXT
+            mass REAL
         )
     """)
     conn.commit()
@@ -63,11 +48,11 @@ def load_custom():
     conn.close()
     return df
 
-def save_custom(code, sidechain):
+def save_custom(code, mass):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("REPLACE INTO custom_aa VALUES (?, ?)",
-              (code.upper(), sidechain))
+              (code.upper(), mass))
     conn.commit()
     conn.close()
 
@@ -79,73 +64,30 @@ def delete_custom(code):
     conn.close()
 
 # =============================
-# Parser
+# Parse Sequence (A or (XXX))
 # =============================
 def parse_sequence(seq):
     tokens = re.findall(r'\([A-Za-z0-9]+\)|[A-Z]', seq)
-    return [t[1:-1] if t.startswith("(") else t for t in tokens]
+    cleaned = []
+    fasta_seq = ""
+
+    for t in tokens:
+        if t.startswith("("):
+            cleaned.append(t[1:-1])
+            fasta_seq += "X"  # placeholder for structure
+        else:
+            cleaned.append(t)
+            fasta_seq += t
+
+    return cleaned, fasta_seq
 
 # =============================
-# Build Single Residue
-# =============================
-def build_residue(sidechain_smiles):
-    backbone = Chem.MolFromSmiles("N[C@@H](*)C(=O)O")
-    sidechain = Chem.MolFromSmiles(sidechain_smiles)
-
-    rw = Chem.RWMol(backbone)
-    star_idx = None
-
-    for atom in rw.GetAtoms():
-        if atom.GetSymbol() == "*":
-            star_idx = atom.GetIdx()
-            break
-
-    offset = rw.GetNumAtoms()
-    rw.InsertMol(sidechain)
-
-    rw.AddBond(star_idx, offset, Chem.rdchem.BondType.SINGLE)
-    rw.RemoveAtom(star_idx)
-
-    mol = rw.GetMol()
-    Chem.SanitizeMol(mol)
-    return mol
-
-# =============================
-# Couple Residues (Amide Bond)
-# =============================
-def couple_residues(m1, m2):
-    rw = Chem.RWMol(Chem.CombineMols(m1, m2))
-    Chem.SanitizeMol(rw)
-
-    # Find C-terminal carbonyl carbon of m1
-    carbonyl = None
-    for atom in rw.GetAtoms():
-        if atom.GetSymbol() == "C":
-            for nbr in atom.GetNeighbors():
-                if nbr.GetSymbol() == "O":
-                    carbonyl = atom.GetIdx()
-                    break
-
-    # Find N-terminal nitrogen of m2
-    nitrogen = None
-    for atom in rw.GetAtoms():
-        if atom.GetSymbol() == "N":
-            nitrogen = atom.GetIdx()
-            break
-
-    rw.AddBond(carbonyl, nitrogen, Chem.rdchem.BondType.SINGLE)
-
-    mol = rw.GetMol()
-    Chem.SanitizeMol(mol)
-    return mol
-
-# =============================
-# Fragmentation (Mass-based)
+# Fragmentation
 # =============================
 def generate_fragments(masses, include_losses):
     fragments = []
-    running = 0
 
+    running = 0
     for i in range(len(masses)-1):
         running += masses[i]
         b = running + PROTON
@@ -171,53 +113,45 @@ def compute_mz(mass, z):
 # =============================
 # UI
 # =============================
-st.title("🔬 Peptide MS/MS Research Tool")
+st.title("🔬 Peptide MS/MS Tool (Stable & Chemically Safe)")
 
 init_db()
 custom_df = load_custom()
 
+# Sidebar
 with st.sidebar.expander("Custom Amino Acid Manager", expanded=False):
-    st.markdown("Draw **sidechain only** (no backbone)")
     code = st.text_input("3-letter Code")
-    sidechain = st_ketcher(height=250)
+    mass = st.number_input("Residue Mass (monoisotopic)", format="%.6f")
 
     if st.button("Save Custom AA"):
-        save_custom(code, sidechain)
+        save_custom(code, mass)
         st.success("Saved.")
 
     st.subheader("Database")
     for _, row in custom_df.iterrows():
         col1, col2 = st.columns([4,1])
-        col1.markdown(f"**{row['code']}**  `{row['sidechain']}`")
+        col1.write(f"{row['code']} ({row['mass']})")
         if col2.button("Delete", key=row["code"]):
             delete_custom(row["code"])
             st.rerun()
 
+# Main
 sequence = st.text_input("Peptide Sequence (e.g., ACD(ORN)K)")
-include_losses = st.checkbox("Include neutral losses", value=True)
+include_losses = st.checkbox("Include neutral losses (-H2O / -NH3)", value=True)
 
 if sequence:
-    tokens = parse_sequence(sequence.upper())
-    residues = []
-    masses = []
+    tokens, fasta_seq = parse_sequence(sequence.upper())
 
+    masses = []
     for t in tokens:
-        if t in DEFAULT_SIDECHAINS:
-            sc = DEFAULT_SIDECHAINS[t]
+        if t in AA_MASS:
+            masses.append(AA_MASS[t])
         else:
             row = custom_df[custom_df["code"] == t]
             if row.empty:
                 st.error("Unknown residue.")
                 st.stop()
-            sc = row.iloc[0]["sidechain"]
-
-        res = build_residue(sc)
-        residues.append(res)
-        masses.append(ExactMolWt(res) - H2O)
-
-    peptide = residues[0]
-    for r in residues[1:]:
-        peptide = couple_residues(peptide, r)
+            masses.append(row.iloc[0]["mass"])
 
     neutral_mass = sum(masses) + H2O
 
@@ -242,7 +176,7 @@ if sequence:
         for name,m in fragments
     ]))
 
-    st.subheader("Spectrum")
+    st.subheader("Simulated Spectrum")
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=[compute_mz(m,1) for _,m in fragments],
@@ -252,4 +186,5 @@ if sequence:
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Full Peptide Structure")
-    st.image(Draw.MolToImage(peptide, size=(700,300)))
+    mol = Chem.MolFromFASTA(fasta_seq)
+    st.image(Draw.MolToImage(mol, size=(700,300)))
