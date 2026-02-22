@@ -65,13 +65,31 @@ def load_custom():
     df = pd.read_sql_query("SELECT * FROM custom_aa", conn)
     conn.close()
     return df
+    
+def save_custom(code, structure_text):
+    if not code or not structure_text:
+        return False
 
-def save_custom(code, molblock):
+    mol = None
+
+    # Try MolBlock first
     try:
-        mol = Chem.MolFromMolBlock(molblock)
-        if mol is None:
-            return False
+        mol = Chem.MolFromMolBlock(structure_text)
+    except:
+        mol = None
 
+    # If that fails, try SMILES
+    if mol is None:
+        try:
+            mol = Chem.MolFromSmiles(structure_text)
+        except:
+            mol = None
+
+    if mol is None:
+        return False
+
+    try:
+        Chem.SanitizeMol(mol)
         mass = ExactMolWt(mol)
         smiles = Chem.MolToSmiles(mol)
 
