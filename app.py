@@ -194,6 +194,8 @@ def compute_mz(mass, z):
 # =============================
 st.title("PepFrag peptide MS tool")
 
+st.write("PepFrag calculates m/z precursors and b/y ions to provide expected MS spectra.")
+
 init_db()
 custom_df = load_custom()
 
@@ -308,6 +310,6 @@ if sequence:
     st.plotly_chart(fig, width="stretch")
 
     st.subheader("Peptide structure")
-    st.write("Custom AAs are shown as cyclobutane sidechains")
+    st.write("Custom AAs are shown as cyclobutane sidechains, PTMs are not shown.")
     visual_mol = build_visual_peptide(tokens, custom_df)
     st.image(Draw.MolToImage(visual_mol, size=(700,300)))
