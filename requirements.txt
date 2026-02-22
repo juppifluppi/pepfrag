@@ -3,3 +3,4 @@ rdkit
 stmol
 pandas
 matplotlib
+streamlit-ketcher
