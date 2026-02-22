@@ -6,7 +6,6 @@ import plotly.graph_objects as go
 from rdkit import Chem
 from rdkit.Chem import Draw, AllChem
 from rdkit.Chem.Descriptors import ExactMolWt
-from streamlit_ketcher import st_ketcher
 
 # =============================
 # Constants
@@ -17,7 +16,7 @@ NH3 = 17.02655
 DB = "aa_database.db"
 
 # =============================
-# Default Amino Acid Sidechains
+# Default Sidechains (no dummy)
 # =============================
 DEFAULT_SIDECHAINS = {
     "A": "C",
@@ -43,7 +42,7 @@ DEFAULT_SIDECHAINS = {
 }
 
 # =============================
-# Database (Auto-Migration Safe)
+# Database
 # =============================
 def init_db():
     conn = sqlite3.connect(DB)
@@ -51,7 +50,6 @@ def init_db():
 
     c.execute("PRAGMA table_info(custom_aa)")
     columns = [col[1] for col in c.fetchall()]
-
     if "sidechain" not in columns:
         c.execute("DROP TABLE IF EXISTS custom_aa")
 
@@ -86,31 +84,39 @@ def delete_custom(code):
     conn.close()
 
 # =============================
-# Sequence Parser
+# Parser
 # =============================
 def parse_sequence(seq):
     tokens = re.findall(r'\([A-Za-z0-9]+\)|[A-Z]', seq)
     return [t[1:-1] if t.startswith("(") else t for t in tokens]
 
 # =============================
-# Build Residue From Sidechain
+# Build Residue Safely
 # =============================
 def build_residue(sidechain_smiles):
     backbone = Chem.MolFromSmiles("N[C@@H]([*:1])C(=O)O")
-    sidechain = Chem.MolFromSmiles(f"[*:1]{sidechain_smiles}")
 
-    combo = Chem.CombineMols(backbone, sidechain)
-    emol = Chem.EditableMol(combo)
+    # attach dummy atom to first atom of sidechain
+    sidechain = Chem.MolFromSmiles(sidechain_smiles)
+    rw = Chem.RWMol(sidechain)
+    dummy = Chem.Atom("*")
+    dummy_idx = rw.AddAtom(dummy)
+    rw.AddBond(dummy_idx, 0, Chem.rdchem.BondType.SINGLE)
+    sidechain = rw.GetMol()
 
-    backbone_atoms = backbone.GetNumAtoms()
-    emol.AddBond(1, backbone_atoms, Chem.rdchem.BondType.SINGLE)
+    # reaction to connect dummy atoms
+    rxn = AllChem.ReactionFromSmarts("[*:1]-[*:2].[*:2]-[*:1]>>[*:1]-[*:1]")
+    products = rxn.RunReactants((backbone, sidechain))
 
-    mol = emol.GetMol()
+    if not products:
+        return None
+
+    mol = products[0][0]
     Chem.SanitizeMol(mol)
     return mol
 
 # =============================
-# Peptide Builder (True Coupling)
+# Peptide Builder
 # =============================
 amide_rxn = AllChem.ReactionFromSmarts(
     "[C:1](=O)[O;H].[N;H2:2]>>[C:1](=O)[N:2]"
@@ -136,6 +142,9 @@ def build_peptide(tokens, custom_df):
             sidechain = row.iloc[0]["sidechain"]
 
         res = build_residue(sidechain)
+        if res is None:
+            return None, None
+
         residues.append(res)
         masses.append(ExactMolWt(res) - H2O)
 
@@ -205,33 +214,25 @@ def plot_spectrum(fragments):
 # =============================
 # UI
 # =============================
-st.title("🔬 Publication-Level Peptide MS/MS Tool")
+st.title("🔬 Peptide MS Tool (Stable Version)")
 
 init_db()
 custom_df = load_custom()
 
-# Collapsible Custom AA Manager
 with st.sidebar.expander("Custom Amino Acid Manager", expanded=False):
-
-    st.markdown("Draw **sidechain only** (no backbone).")
-
     code = st.text_input("3-letter Code")
-    sidechain = st_ketcher(height=250)
-
+    sidechain = st.text_input("Sidechain SMILES (no backbone)")
     if st.button("Save Custom AA"):
         save_custom(code, sidechain)
         st.success("Saved.")
 
-    st.subheader("Database")
-
     for _, row in custom_df.iterrows():
         col1, col2 = st.columns([4,1])
-        col1.markdown(f"**{row['code']}**  \n`{row['sidechain']}`")
+        col1.markdown(f"**{row['code']}**  `{row['sidechain']}`")
         if col2.button("Delete", key=row["code"]):
             delete_custom(row["code"])
             st.rerun()
 
-# Main Interface
 sequence = st.text_input("Peptide Sequence (e.g., ACD(ORN)K)")
 include_losses = st.checkbox("Include neutral losses (-H2O / -NH3)", value=True)
 
@@ -252,14 +253,7 @@ if sequence:
         fragments = generate_fragments(masses, include_losses)
 
         st.subheader("Fragment Table")
-        frag_table = build_table(fragments)
-        st.dataframe(frag_table)
-
-        st.download_button(
-            "Download Fragment CSV",
-            frag_table.to_csv(index=False),
-            "fragments.csv"
-        )
+        st.dataframe(build_table(fragments))
 
         st.subheader("Simulated MS/MS Spectrum")
         st.plotly_chart(plot_spectrum(fragments), use_container_width=True)
@@ -269,4 +263,4 @@ if sequence:
         st.image(img)
 
     else:
-        st.error("Invalid sequence or unknown residue.")
+        st.error("Invalid sidechain or sequence.")
